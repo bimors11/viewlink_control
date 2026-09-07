@@ -6,9 +6,10 @@ from pathlib import Path
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from . import viewlink_types as T
+from .camera_controller import CameraController, SOURCE_MOUSE, SOURCE_UI
 from .joystick import JoystickCommander, JoystickConfig, JoystickWorker
-from .sdk import ViewLinkSDK
-from .video import VideoWorker
+from .sdk import ConnectionState, TELEMETRY_STALE_TIMEOUT, TRACK_VIDEO_HEIGHT, TRACK_VIDEO_WIDTH, ViewLinkSDK
+from .video import VIDEO_CONNECTING, VIDEO_LIVE, VIDEO_RECONNECTING, VIDEO_STOPPED, VideoWorker
 from .dashboard_theme import CockpitBackground, CollapsibleSection, apply_style
 
 
@@ -75,11 +76,11 @@ class VideoLabel(QtWidgets.QLabel):
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == QtCore.Qt.LeftButton and self._frame_w and self._frame_h:
-            mapped = self._map_widget_to_frame(event.pos())
+            mapped = self._map_widget_to_tracking_frame(event.pos())
             if mapped:
                 x, y = mapped
                 self._last_target = (x, y)
-                self.target_selected.emit(x, y, self._frame_w, self._frame_h)
+                self.target_selected.emit(x, y, TRACK_VIDEO_WIDTH, TRACK_VIDEO_HEIGHT)
         super().mouseReleaseEvent(event)
 
     def mousePressEvent(self, event) -> None:
@@ -105,6 +106,20 @@ class VideoLabel(QtWidgets.QLabel):
         y = int((pos.y() - y0) / scaled.height() * self._frame_h)
         return max(0, min(self._frame_w - 1, x)), max(0, min(self._frame_h - 1, y))
 
+    def _map_widget_to_tracking_frame(self, pos: QtCore.QPoint) -> tuple[int, int] | None:
+        pixmap = self.pixmap()
+        if not pixmap:
+            return None
+        scaled = pixmap.size()
+        x0 = (self.width() - scaled.width()) / 2
+        y0 = (self.height() - scaled.height()) / 2
+        if pos.x() < x0 or pos.y() < y0 or pos.x() > x0 + scaled.width() or pos.y() > y0 + scaled.height():
+            return None
+        x_ratio = (pos.x() - x0) / scaled.width()
+        y_ratio = (pos.y() - y0) / scaled.height()
+        x = round(x_ratio * (TRACK_VIDEO_WIDTH - 1))
+        y = round(y_ratio * (TRACK_VIDEO_HEIGHT - 1))
+        return max(0, min(TRACK_VIDEO_WIDTH - 1, x)), max(0, min(TRACK_VIDEO_HEIGHT - 1, y))
 
 class HoldButton(QtWidgets.QPushButton):
     pressed_changed = QtCore.pyqtSignal(bool)
@@ -124,16 +139,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.root = root
         self.sdk = ViewLinkSDK(root)
         self.sdk.initialize()
+        self.controller = CameraController(self.sdk)
         self.video_worker: VideoWorker | None = None
         self.joystick_worker: JoystickWorker | None = None
-        self.joystick_commander = JoystickCommander(self.sdk, self)
+        self.joystick_commander = JoystickCommander(self.controller, self)
         self.current_sensor = T.VLK_SENSOR_VISIBLE1
         self.current_image = T.VLK_IMAGE_TYPE_VISIBLE1
         self.current_ir_color = T.VLK_IR_COLOR_WHITEHOT
         self._wheel_zoom_timer = QtCore.QTimer(self)
         self._wheel_zoom_timer.setInterval(350)
         self._wheel_zoom_timer.setSingleShot(True)
-        self._wheel_zoom_timer.timeout.connect(self.sdk.VLK_StopZoom)
+        self._wheel_zoom_timer.timeout.connect(lambda: self.controller.stop_zoom(source=SOURCE_MOUSE))
+        self._telemetry_timer = QtCore.QTimer(self)
+        self._telemetry_timer.setInterval(500)
+        self._telemetry_timer.timeout.connect(self._refresh_telemetry_status)
 
         self.setWindowTitle("Viewpro ViewLink Control")
         self.resize(1440, 900)
@@ -142,6 +161,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_style()
         self.statusBar().showMessage(f"ViewLink SDK {self.sdk.version()} | {self.sdk.lib_path}")
         self.statusBar().hide()
+        self._telemetry_timer.start()
 
     def _build_ui(self) -> None:
         central = CockpitBackground()
@@ -250,7 +270,8 @@ class MainWindow(QtWidgets.QMainWindow):
             ("yaw_label", "Yaw"), ("pitch_label", "Pitch"),
             ("roll_label", "Roll"), ("zoom_label", "Zoom"),
             ("fov_label", "FOV"), ("laser_label", "Laser"),
-            ("track_label", "Track"), ("model_label", "Camera"),
+            ("track_label", "Track"), ("telemetry_status_label", "Telemetry"),
+            ("model_label", "Camera"),
         ]):
             label = QtWidgets.QLabel(title + " --")
             label.setObjectName("metricValue" if index < 4 else "metricLabel")
@@ -350,7 +371,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pitch_spin.setRange(-90, 90)
         self.pitch_spin.setPrefix("Tilt ")
         angle = QtWidgets.QPushButton("Set Angle")
-        angle.clicked.connect(lambda: self._when_connected(self.sdk.VLK_TurnTo, self.yaw_spin.value(), self.pitch_spin.value()))
+        angle.clicked.connect(lambda: self._when_connected(self.controller.turn_to, self.yaw_spin.value(), self.pitch_spin.value()))
         grid.addWidget(self.yaw_spin, 6, 0)
         grid.addWidget(self.pitch_spin, 6, 1)
         grid.addWidget(angle, 6, 2)
@@ -398,23 +419,22 @@ class MainWindow(QtWidgets.QMainWindow):
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QGridLayout(widget)
         self.ai_btn = QtWidgets.QPushButton("Start AI")
-        self.track_center_btn = QtWidgets.QPushButton("Track Center")
         self.stop_track_btn = QtWidgets.QPushButton("Stop Track")
         self.track_sensor = QtWidgets.QComboBox()
         self.track_sensor.addItem("Visible 1", T.VLK_SENSOR_VISIBLE1)
+        self.track_sensor.addItem("Visible 2", T.VLK_SENSOR_VISIBLE2)
         self.track_sensor.addItem("IR", T.VLK_SENSOR_IR)
         self.track_template = QtWidgets.QComboBox()
-        self.track_template.addItem("Auto", T.VLK_TRACK_TEMPLATE_SIZE_AUTO)
-        self.track_template.addItem("32", T.VLK_TRACK_TEMPLATE_SIZE_32)
-        self.track_template.addItem("64", T.VLK_TRACK_TEMPLATE_SIZE_64)
-        self.track_template.addItem("128", T.VLK_TRACK_TEMPLATE_SIZE_128)
+        self.track_template.addItem("32x32", T.VLK_TRACK_TEMPLATE_SIZE_32)
+        self.track_template.addItem("64x64", T.VLK_TRACK_TEMPLATE_SIZE_64)
+        self.track_template.addItem("128x128", T.VLK_TRACK_TEMPLATE_SIZE_128)
+        self.track_template.setCurrentIndex(1)
         layout.addWidget(self.ai_btn, 0, 0)
         layout.addWidget(self.stop_track_btn, 0, 1)
-        layout.addWidget(self.track_center_btn, 1, 0, 1, 2)
-        layout.addWidget(QtWidgets.QLabel("Sensor"), 2, 0)
-        layout.addWidget(self.track_sensor, 2, 1)
-        layout.addWidget(QtWidgets.QLabel("Template"), 3, 0)
-        layout.addWidget(self.track_template, 3, 1)
+        layout.addWidget(QtWidgets.QLabel("Sensor"), 1, 0)
+        layout.addWidget(self.track_sensor, 1, 1)
+        layout.addWidget(QtWidgets.QLabel("Template"), 2, 0)
+        layout.addWidget(self.track_template, 2, 1)
         return widget
 
     def _advanced_controls(self) -> QtWidgets.QWidget:
@@ -474,8 +494,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.down_btn.pressed_changed.connect(lambda active: self._move_hold(0, -1, active))
         self.left_btn.pressed_changed.connect(lambda active: self._move_hold(-1, 0, active))
         self.right_btn.pressed_changed.connect(lambda active: self._move_hold(1, 0, active))
-        self.home_btn.clicked.connect(lambda: self._when_connected(self.sdk.VLK_Home))
-        self.stop_btn.clicked.connect(self.sdk.stop_all_motion)
+        self.home_btn.clicked.connect(lambda: self._when_connected(self.controller.home))
+        self.stop_btn.clicked.connect(self.controller.stop_all_motion)
         self.follow_check.toggled.connect(lambda on: self._when_connected(self.sdk.VLK_EnableFollowMode, 1 if on else 0))
         self.motor_check.toggled.connect(lambda on: self._when_connected(self.sdk.VLK_SwitchMotor, 1 if on else 0))
 
@@ -491,7 +511,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.record_btn.clicked.connect(self._toggle_recording)
 
         self.ai_btn.clicked.connect(self._toggle_ai)
-        self.track_center_btn.clicked.connect(self._track_center)
         self.stop_track_btn.clicked.connect(self._stop_tracking)
         self.video_label.target_selected.connect(self._track_target)
         self.video_label.stop_tracking_requested.connect(self._stop_tracking)
@@ -502,15 +521,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.osd_check.toggled.connect(self._set_osd)
         self.cross_check.toggled.connect(self._set_osd)
         self.pitch_yaw_check.toggled.connect(self._set_osd)
-        self.laser_check.toggled.connect(lambda on: self._when_connected(self.sdk.VLK_SwitchLaser, 1 if on else 0))
-        self.laser_single_btn.clicked.connect(lambda: self._when_connected(self.sdk.VLK_LaserSingle))
+        self.laser_check.toggled.connect(self._set_laser_enabled)
+        self.laser_single_btn.clicked.connect(self._rangefinder_single)
 
     def _apply_style(self) -> None:
         apply_style()
 
     def _toggle_connection(self) -> None:
         try:
-            if self.sdk.connected:
+            if self.sdk.connected or self.sdk.connection_state == ConnectionState.CONNECTING:
                 self.sdk.disconnect()
                 self.connect_btn.setText("Connect")
                 return
@@ -539,7 +558,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.video_btn.setText("Close Video")
 
     def _video_status_changed(self, text):
-        self.video_status.setText(text if text in ("Live", "Connecting") else "Offline")
+        if text == VIDEO_LIVE:
+            label = "VIDEO LIVE"
+        elif text in (VIDEO_CONNECTING, VIDEO_RECONNECTING):
+            label = text
+        elif text == VIDEO_STOPPED:
+            label = "VIDEO STOPPED"
+        else:
+            label = "VIDEO ERROR"
+        self.video_status.setText(label)
         self.video_status.setToolTip(text)
 
     def _video_finished(self):
@@ -590,11 +617,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_sdk_status(self, text: str) -> None:
         self.conn_status.setText(text)
-        if "TCP" in text or text == "Disconnected":
+        if not self.sdk.connected:
+            self.controller.reset()
+            self.joystick_commander.reset_command_cache()
+        if "TCP" in text or text == "Disconnected" or "Connecting" in text:
             self.connect_btn.setText("Disconnect" if self.sdk.connected else "Connect TCP")
         self.statusBar().showMessage(text, 3000)
+        self._refresh_telemetry_status()
 
     def _on_telemetry(self, telemetry: T.Telemetry) -> None:
+        if not self._telemetry_is_fresh():
+            self._show_stale_telemetry()
+            return
         self.yaw_label.setText(f"Yaw {telemetry.yaw:.2f}")
         self.pitch_label.setText(f"Pitch {telemetry.pitch:.2f}")
         self.roll_label.setText(f"Roll {telemetry.roll:.2f}")
@@ -602,6 +636,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fov_label.setText(f"FOV {telemetry.fov_h:.2f} / {telemetry.fov_v:.2f}")
         self.laser_label.setText(f"Laser {telemetry.laser_distance}m")
         self.track_label.setText(f"Track {TRACKER_LABELS.get(telemetry.tracker_status, telemetry.tracker_status)}")
+        self.telemetry_status_label.setText("Telemetry OK")
         self.model_label.setText(self.sdk.model_label)
         self.record_btn.setText("Stop Rec" if telemetry.record_mode == T.VLK_RECORD_MODE_RECORD else "Record")
         recording = telemetry.record_mode == T.VLK_RECORD_MODE_RECORD
@@ -625,12 +660,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _move_hold(self, yaw_dir: int, pitch_dir: int, active: bool) -> None:
         if active:
-            self.sdk.move(yaw_dir * self._speed(), pitch_dir * self._speed())
+            self.controller.move(yaw_dir * self._speed(), pitch_dir * self._speed(), source=SOURCE_UI)
         else:
-            self.sdk.VLK_Stop()
+            self.controller.stop_move(source=SOURCE_UI)
 
     def _zoom_hold(self, direction: int, active: bool) -> None:
-        self.sdk.zoom_continuous(direction if active else 0, 4)
+        self.controller.zoom_continuous(direction if active else 0, 4, source=SOURCE_UI)
 
     def _focus_hold(self, direction: int, active: bool) -> None:
         if not self.sdk.connected:
@@ -648,6 +683,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.current_image in (T.VLK_IMAGE_TYPE_IR1, T.VLK_IMAGE_TYPE_IR2, T.VLK_IMAGE_TYPE_FUSION):
             self.current_sensor = T.VLK_SENSOR_IR
             idx = self.track_sensor.findData(T.VLK_SENSOR_IR)
+            if idx >= 0:
+                self.track_sensor.setCurrentIndex(idx)
+        elif self.current_image == T.VLK_IMAGE_TYPE_VISIBLE2:
+            self.current_sensor = T.VLK_SENSOR_VISIBLE2
+            idx = self.track_sensor.findData(T.VLK_SENSOR_VISIBLE2)
             if idx >= 0:
                 self.track_sensor.setCurrentIndex(idx)
         else:
@@ -685,11 +725,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sdk.stop_tracking()
         self.ai_btn.setText("Start AI")
 
-    def _track_center(self) -> None:
-        w = self.video_label._frame_w or 1280
-        h = self.video_label._frame_h or 720
-        self._track_target(w // 2, h // 2, w, h)
-
     def _track_target(self, x: int, y: int, video_w: int, video_h: int) -> None:
         if not self.sdk.connected:
             self.statusBar().showMessage("TCP not connected", 2000)
@@ -699,11 +734,51 @@ class MainWindow(QtWidgets.QMainWindow):
         sensor = self.track_sensor.currentData()
         template = self.track_template.currentData()
         self.sdk.start_tracking(x, y, video_w, video_h, sensor, template)
+        self.statusBar().showMessage(f"Tracking click {x},{y} template={template}", 3000)
         self.ai_btn.setText("Stop AI")
 
     def _video_zoom(self, direction: int) -> None:
-        self.sdk.zoom_continuous(direction, 4)
+        self.controller.zoom_continuous(direction, 4, source=SOURCE_MOUSE)
         self._wheel_zoom_timer.start()
+
+    def _set_laser_enabled(self, enabled: bool) -> None:
+        self._when_connected(self.sdk.VLK_SwitchLaser, 1 if enabled else 0)
+        self.statusBar().showMessage("Laser on" if enabled else "Laser off", 2000)
+
+    def _rangefinder_single(self) -> None:
+        if not self.sdk.connected:
+            self.statusBar().showMessage("TCP not connected", 2000)
+            return
+        if not self.laser_check.isChecked():
+            self.laser_check.setChecked(True)
+            QtCore.QTimer.singleShot(150, self._rangefinder_single)
+            return
+        self.sdk.VLK_LaserSingle()
+        self.statusBar().showMessage("Laser range requested", 2000)
+
+    def _telemetry_is_fresh(self) -> bool:
+        try:
+            return bool(self.sdk.telemetry_fresh(TELEMETRY_STALE_TIMEOUT))
+        except AttributeError:
+            return True
+
+    def _refresh_telemetry_status(self) -> None:
+        if self.sdk.connected and not self._telemetry_is_fresh():
+            self._show_stale_telemetry()
+        elif self.sdk.connected:
+            self.telemetry_status_label.setText("Telemetry OK")
+        else:
+            self.telemetry_status_label.setText("Telemetry --")
+
+    def _show_stale_telemetry(self) -> None:
+        self.yaw_label.setText("Yaw --")
+        self.pitch_label.setText("Pitch --")
+        self.roll_label.setText("Roll --")
+        self.zoom_label.setText("Zoom --")
+        self.fov_label.setText("FOV --")
+        self.laser_label.setText("Laser --")
+        self.track_label.setText("Track --")
+        self.telemetry_status_label.setText("Telemetry LOST")
 
     def _set_osd(self) -> None:
         mask = 0
@@ -718,6 +793,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._wheel_zoom_timer.stop()
+        self._telemetry_timer.stop()
         if self.video_worker:
             self.video_worker.stop()
         if self.joystick_worker:

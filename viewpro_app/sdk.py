@@ -5,10 +5,25 @@ import os
 import platform
 import shutil
 import threading
+import time
+from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
 
 from . import viewlink_types as T
+
+
+TELEMETRY_STALE_TIMEOUT = 2.0
+AI_TRACK_START_SETTLE_SECONDS = 0.10
+TRACK_VIDEO_WIDTH = 1920
+TRACK_VIDEO_HEIGHT = 1080
+
+
+class ConnectionState(Enum):
+    DISCONNECTED = "DISCONNECTED"
+    CONNECTING = "CONNECTING"
+    CONNECTED = "CONNECTED"
+    ERROR = "ERROR"
 
 
 class ViewLinkSDK:
@@ -19,12 +34,14 @@ class ViewLinkSDK:
         self._lock = threading.RLock()
         self._initialized = False
         self._connected = False
+        self._connection_state = ConnectionState.DISCONNECTED
         self._model_name = ""
         self._model_code = 0
         self._firmware = ""
         self._device_id = ""
         self._serial_no = ""
         self._telemetry = T.Telemetry()
+        self._last_telemetry_rx = 0.0
         self._status_text = "Idle"
         self._conn_listeners: list[Callable[[str], None]] = []
         self._telemetry_listeners: list[Callable[[T.Telemetry], None]] = []
@@ -134,6 +151,7 @@ class ViewLinkSDK:
             self._prepare_log_dir()
             ret = self.VLK_Init()
             if ret != T.VLK_ERROR_NO_ERROR:
+                self._set_connection_state(ConnectionState.ERROR, f"VLK_Init failed: {ret}")
                 raise RuntimeError(f"VLK_Init failed: {ret}")
             self.VLK_SetKeepAliveInterval(300)
             self.VLK_RegisterDevStatusCB(self._dev_cb, None)
@@ -157,12 +175,20 @@ class ViewLinkSDK:
                     self.VLK_UnInit()
                     self._initialized = False
                     self._connected = False
+                    self._set_connection_state(ConnectionState.DISCONNECTED, "Disconnected")
 
     def version(self) -> str:
         raw = self.GetSDKVersion()
         return raw.decode("utf-8", errors="ignore") if raw else "unknown"
 
     def connect_tcp(self, ip: str, port: int) -> None:
+        if self.connection_state == ConnectionState.CONNECTING:
+            self._set_status("Connect ignored: already connecting")
+            return
+        if self.connected:
+            self._set_status("Connect ignored: already connected")
+            return
+        self._set_connection_state(ConnectionState.CONNECTING, f"Connecting {ip}:{port}")
         self.initialize()
         param = T.VLK_CONN_PARAM()
         C.memset(C.byref(param), 0, C.sizeof(param))
@@ -172,23 +198,34 @@ class ViewLinkSDK:
         param.ConnParam.IPAddr.iPort = int(port)
         ret = self.VLK_Connect(C.byref(param), self._conn_cb, None)
         if ret != T.VLK_ERROR_NO_ERROR:
+            self._set_connection_state(ConnectionState.ERROR, f"VLK_Connect failed: {ret}")
             raise RuntimeError(f"VLK_Connect failed: {ret}")
-        self._set_status(f"Connecting {ip}:{port}")
 
     def disconnect(self) -> None:
         self.stop_all_motion()
         self.stop_tracking()
         self.VLK_DisconnectTCP()
         self._connected = False
-        self._set_status("Disconnected")
+        self._set_connection_state(ConnectionState.DISCONNECTED, "Disconnected")
 
     @property
     def connected(self) -> bool:
         return bool(self.VLK_IsTCPConnected()) if self._initialized else False
 
     @property
+    def connection_state(self) -> ConnectionState:
+        return self._connection_state
+
+    @property
     def telemetry(self) -> T.Telemetry:
         return self._telemetry
+
+    @property
+    def last_telemetry_rx(self) -> float:
+        return self._last_telemetry_rx
+
+    def telemetry_fresh(self, timeout: float = TELEMETRY_STALE_TIMEOUT) -> bool:
+        return self._last_telemetry_rx > 0 and time.monotonic() - self._last_telemetry_rx <= timeout
 
     @property
     def model_label(self) -> str:
@@ -231,13 +268,14 @@ class ViewLinkSDK:
             self._set_status("Tracking ignored: TCP not connected")
             return
         param = T.VLK_TRACK_MODE_PARAM(template_size, sensor)
-        self.VLK_OpenAiState()
-        self.VLK_StartAI()
-        self.VLK_OpenTrackXY()
-        self.VLK_EnableTrackMode(C.byref(param))
+        try:
+            self.VLK_OpenAiState()
+            self.VLK_StartAI()
+            time.sleep(AI_TRACK_START_SETTLE_SECONDS)
+        except Exception:
+            pass
         self.VLK_TrackTargetPositionEx(C.byref(param), int(x), int(y), int(video_w), int(video_h))
-        self.VLK_StartTrack()
-        self._set_status(f"Tracking target {x},{y}")
+        self._set_status(f"Tracking target click {x},{y} frame={video_w}x{video_h} sensor={sensor} template={template_size}")
 
     def stop_tracking(self) -> None:
         if not self._initialized:
@@ -264,18 +302,22 @@ class ViewLinkSDK:
         for cb in list(self._conn_listeners):
             cb(text)
 
+    def _set_connection_state(self, state: ConnectionState, text: str) -> None:
+        self._connection_state = state
+        self._set_status(text)
+
     def _on_connection_status(self, status: int, msg: Optional[bytes], msg_len: int, user: int) -> int:
         del user
         if status == T.VLK_CONN_STATUS_TCP_CONNECTED:
             self._connected = True
-            self._set_status("TCP connected")
+            self._set_connection_state(ConnectionState.CONNECTED, "TCP connected")
             try:
                 self.VLK_QueryDevConfiguration()
             except Exception:
                 pass
         elif status == T.VLK_CONN_STATUS_TCP_DISCONNECTED:
             self._connected = False
-            self._set_status("TCP disconnected")
+            self._set_connection_state(ConnectionState.DISCONNECTED, "TCP disconnected")
         else:
             detail = msg[:msg_len].decode("utf-8", errors="ignore") if msg else ""
             self._set_status(f"Connection status {status} {detail}".strip())
@@ -318,6 +360,7 @@ class ViewLinkSDK:
                     ir_color=src.emIRColor,
                     record_mode=src.emRecordMode,
                 )
+                self._last_telemetry_rx = time.monotonic()
                 for cb in list(self._telemetry_listeners):
                     cb(self._telemetry)
         except Exception as exc:

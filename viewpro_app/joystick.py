@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 from PyQt5 import QtCore
 
+from .camera_controller import SOURCE_JOYSTICK
+
 
 JS_EVENT_BUTTON = 0x01
 JS_EVENT_AXIS = 0x02
@@ -113,9 +115,9 @@ class JoystickWorker(QtCore.QThread):
 class JoystickCommander(QtCore.QObject):
     status_changed = QtCore.pyqtSignal(str)
 
-    def __init__(self, sdk, parent=None):
+    def __init__(self, controller, parent=None):
         super().__init__(parent)
-        self.sdk = sdk
+        self.controller = controller
         self.state = JoystickState()
         self.max_yaw_speed = 1200
         self.max_pitch_speed = 1200
@@ -139,20 +141,28 @@ class JoystickCommander(QtCore.QObject):
         self.state = state
 
     def _tick(self) -> None:
-        if not self.sdk.connected:
+        if not self.controller.connected:
+            self.controller.reset()
+            self.reset_command_cache()
             return
         yaw = int(self.state.pan * self.max_yaw_speed)
         pitch = int(-self.state.tilt * self.max_pitch_speed)
         zoom_dir = 1 if self.state.zoom > 0.2 else -1 if self.state.zoom < -0.2 else 0
         if (yaw, pitch) != self._last_move:
-            self.sdk.move(yaw, pitch)
+            if yaw or pitch:
+                self.controller.move(yaw, pitch, source=SOURCE_JOYSTICK)
+            else:
+                self.controller.stop_move(source=SOURCE_JOYSTICK)
             self._last_move = (yaw, pitch)
         if zoom_dir != self._last_zoom_dir:
-            self.sdk.zoom_continuous(zoom_dir, self.zoom_speed)
+            self.controller.zoom_continuous(zoom_dir, self.zoom_speed, source=SOURCE_JOYSTICK)
             self._last_zoom_dir = zoom_dir
 
     def _send_neutral(self) -> None:
-        if self.sdk.connected:
-            self.sdk.stop_all_motion()
+        self.controller.stop_move(source=SOURCE_JOYSTICK)
+        self.controller.stop_zoom(source=SOURCE_JOYSTICK)
+        self.reset_command_cache()
+
+    def reset_command_cache(self) -> None:
         self._last_move = (0, 0)
         self._last_zoom_dir = 0
