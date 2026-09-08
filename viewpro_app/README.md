@@ -1,4 +1,4 @@
-# Viewpro ViewLink UI
+# VControl
 
 Desktop control UI for Viewpro gimbals using the bundled ViewLink SDK.
 The dashboard uses the layout, colors, typography, and collapsible controls from
@@ -17,6 +17,15 @@ the application does not import or require `zt30sdk`.
 ```bash
 python3 -m viewpro_app
 ```
+
+## Setup and AppImage
+
+```bash
+./setup.sh
+./install.sh
+```
+
+The AppImage is written to `build/`.
 
 Requirements:
 

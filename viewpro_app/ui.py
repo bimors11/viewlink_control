@@ -154,7 +154,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._telemetry_timer.setInterval(500)
         self._telemetry_timer.timeout.connect(self._refresh_telemetry_status)
 
-        self.setWindowTitle("Viewpro ViewLink Control")
+        self.setWindowTitle("VControl")
         self.resize(1440, 900)
         self._build_ui()
         self._connect_signals()
@@ -806,7 +806,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def run(root: Path) -> int:
     app = QtWidgets.QApplication([])
-    app.setApplicationName("Viewpro Control")
+    app.setApplicationName("VControl")
     app.setFont(QtGui.QFont("Inter", 10))
     window = MainWindow(root)
     window.show()
