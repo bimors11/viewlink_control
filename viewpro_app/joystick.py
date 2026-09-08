@@ -148,7 +148,7 @@ class JoystickCommander(QtCore.QObject):
             self.reset_command_cache()
             return
         yaw = int(self.state.pan * self.max_yaw_speed)
-        pitch = int(-self.state.tilt * self.max_pitch_speed)
+        pitch = int(self.state.tilt * self.max_pitch_speed)
         zoom_dir = 1 if self.state.zoom > 0.2 else -1 if self.state.zoom < -0.2 else 0
         if (yaw, pitch) != self._last_move:
             if yaw or pitch:

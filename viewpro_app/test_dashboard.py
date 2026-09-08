@@ -105,10 +105,36 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(state, JoystickState(0.5, -0.5, 1))
         w.joystick_commander.set_state(state)
         w.joystick_commander._tick()
-        self.sdk.move.assert_called_with(w._speed() // 2, w.joystick_commander.max_pitch_speed // 2)
+        self.sdk.move.assert_called_with(w._speed() // 2, -w.joystick_commander.max_pitch_speed // 2)
         self.sdk.VLK_ZoomIn.assert_called_with(4)
         w.joystick_commander.stop()
         self.assertEqual(w.joystick_commander.state, JoystickState())
+
+    def test_tracking_does_not_disable_active_joystick(self):
+        w = self.window
+        w.joystick_worker = object()
+        try:
+            with patch.object(w, "_toggle_joystick") as toggle:
+                w._track_target(321, 222, TRACK_VIDEO_WIDTH, TRACK_VIDEO_HEIGHT)
+            toggle.assert_not_called()
+            self.assertIsNotNone(w.joystick_worker)
+        finally:
+            w.joystick_worker = None
+
+    def test_auto_start_joystick_when_device_exists(self):
+        w = self.window
+        with patch("viewpro_app.ui.os.path.exists", return_value=True), patch.object(w, "_start_joystick", return_value=True) as start:
+            w._auto_start_joystick_if_available()
+        start.assert_called_once()
+
+    def test_tcp_connected_forces_pip_off(self):
+        w = self.window
+        w.pip_check.setChecked(True)
+        self.sdk.VLK_SetImageColor.reset_mock()
+        w._on_sdk_status("TCP connected")
+        QtTest.QTest.qWait(250)
+        self.assertFalse(w.pip_check.isChecked())
+        self.sdk.VLK_SetImageColor.assert_called_with(w.current_image, 0, w.current_ir_color)
 
     def test_joystick_reconnect_resends_cached_position(self):
         sdk = FakeSDK()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -142,6 +143,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.controller = CameraController(self.sdk)
         self.video_worker: VideoWorker | None = None
         self.joystick_worker: JoystickWorker | None = None
+        self._joystick_manual_disabled = False
         self.joystick_commander = JoystickCommander(self.controller, self)
         self.current_sensor = T.VLK_SENSOR_VISIBLE1
         self.current_image = T.VLK_IMAGE_TYPE_VISIBLE1
@@ -583,11 +585,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.joystick_worker.stop()
             self.joystick_worker = None
             self.joystick_commander.stop()
+            self._joystick_manual_disabled = True
             self.joystick_btn.setText("Enable Joystick")
             return
         if not self.sdk.connected:
             self.statusBar().showMessage("TCP not connected", 2000)
             return
+        self._start_joystick()
+
+    def _start_joystick(self) -> bool:
+        if self.joystick_worker:
+            return True
         config = JoystickConfig(
             device=self.js_device.text().strip(),
             name=DEFAULT_JOYSTICK_NAME,
@@ -602,7 +610,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.joystick_worker.finished.connect(self._joystick_finished)
         self.joystick_commander.start()
         self.joystick_worker.start()
+        self._joystick_manual_disabled = False
         self.joystick_btn.setText("Stop JS")
+        return True
+
+    def _auto_start_joystick_if_available(self) -> None:
+        if self.joystick_worker or self._joystick_manual_disabled or not self.sdk.connected:
+            return
+        device = self.js_device.text().strip()
+        if os.path.exists(device):
+            self._start_joystick()
+        else:
+            self.statusBar().showMessage(f"Joystick not found: {device}", 2000)
 
     def _joystick_finished(self):
         worker = self.sender()
@@ -623,6 +642,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.joystick_commander.reset_command_cache()
         if "TCP" in text or text == "Disconnected" or "Connecting" in text:
             self.connect_btn.setText("Disconnect" if self.sdk.connected else "Connect TCP")
+        if self.sdk.connected and "connected" in text.lower():
+            self.pip_check.setChecked(False)
+            QtCore.QTimer.singleShot(150, self._set_image_color)
+            QtCore.QTimer.singleShot(250, self._auto_start_joystick_if_available)
         self.statusBar().showMessage(text, 3000)
         self._refresh_telemetry_status()
 
@@ -730,8 +753,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.sdk.connected:
             self.statusBar().showMessage("TCP not connected", 2000)
             return
-        if self.joystick_worker is not None:
-            self._toggle_joystick()
         sensor = self.track_sensor.currentData()
         template = self.track_template.currentData()
         self.sdk.start_tracking(x, y, video_w, video_h, sensor, template)
