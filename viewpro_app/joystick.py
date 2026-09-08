@@ -16,14 +16,16 @@ JS_EVENT_AXIS = 0x02
 JS_EVENT_INIT = 0x80
 JS_EVENT_FORMAT = "IhBB"
 JS_EVENT_SIZE = struct.calcsize(JS_EVENT_FORMAT)
+DEFAULT_JOYSTICK_NAME = "EdgeTX Radiomaster Pocket Joystick"
 
 
 @dataclass
 class JoystickConfig:
     device: str = "/dev/input/js0"
-    pan_channel: int = 1
-    tilt_channel: int = 2
-    zoom_channel: int = 3
+    name: str = DEFAULT_JOYSTICK_NAME
+    pan_channel: int = 0
+    tilt_channel: int = 1
+    zoom_channel: int = 2
     deadzone: float = 0.08
     invert_pan: bool = False
     invert_tilt: bool = False
@@ -57,7 +59,7 @@ class JoystickWorker(QtCore.QThread):
             self.status_changed.emit(f"Joystick unavailable: {exc}")
             self._running = False
             return
-        self.status_changed.emit(f"Joystick connected: {self.config.device}")
+        self.status_changed.emit(f"Joystick connected: {self.config.name} ({self.config.device})")
         while self._running:
             readable, _, _ = select.select([self._fd], [], [], 0.1)
             if not readable:
@@ -78,7 +80,7 @@ class JoystickWorker(QtCore.QThread):
                 if abs(normalized) < self.config.deadzone:
                     normalized = 0.0
                 self._axis_values[number] = normalized
-                self.raw_event.emit(f"axis {number + 1}: {normalized:+.2f}")
+                self.raw_event.emit(f"axis {number}: {normalized:+.2f}")
                 self.state_changed.emit(self._mapped_state())
             elif clean_type == JS_EVENT_BUTTON:
                 self.raw_event.emit(f"button {number + 1}: {value}")
@@ -100,9 +102,9 @@ class JoystickWorker(QtCore.QThread):
             self._fd = None
 
     def _mapped_state(self) -> JoystickState:
-        pan = self._axis_values.get(self.config.pan_channel - 1, 0.0)
-        tilt = self._axis_values.get(self.config.tilt_channel - 1, 0.0)
-        zoom = self._axis_values.get(self.config.zoom_channel - 1, 0.0)
+        pan = self._axis_values.get(self.config.pan_channel, 0.0)
+        tilt = self._axis_values.get(self.config.tilt_channel, 0.0)
+        zoom = self._axis_values.get(self.config.zoom_channel, 0.0)
         if self.config.invert_pan:
             pan *= -1
         if self.config.invert_tilt:

@@ -73,7 +73,7 @@ class DashboardTests(unittest.TestCase):
     def test_layout_and_collapse(self):
         w = self.window
         self.assertEqual(w.ip_edit.text(), "192.168.144.25")
-        self.assertEqual([w.pan_channel.value(), w.tilt_channel.value(), w.zoom_channel.value()], [1, 2, 3])
+        self.assertEqual([w.pan_channel.value(), w.tilt_channel.value(), w.zoom_channel.value()], [0, 1, 2])
         removed_label = "Track" + " Center"
         self.assertNotIn(removed_label, [button.text() for button in w.findChildren(QtWidgets.QPushButton)])
         for section in w.findChildren(CollapsibleSection):

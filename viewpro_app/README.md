@@ -9,8 +9,8 @@ the application does not import or require `zt30sdk`.
 
 - Gimbal control: `192.168.144.25:2000`
 - Video stream: `rtsp://192.168.144.25:554`
-- Joystick: `/dev/input/js0`
-- Joystick mapping: pan channel 1, tilt channel 2, zoom channel 3
+- Joystick: EdgeTX Radiomaster Pocket Joystick at `/dev/input/js0`
+- Joystick mapping: pan axis 0, tilt axis 1, zoom axis 2
 
 ## Run
 
@@ -44,7 +44,7 @@ Use Connect + Play for control and video, or Open Video for RTSP only.
 - Click on video: start AI tracking at target point
 - Right click on video: stop tracking
 
-Joystick channels are one-based Linux axes (channels 1/2/3 correspond to axes
-0/1/2). The gimbal Speed slider also controls joystick pan/tilt speed. Enable
-Joystick in its section after connecting. Actual command support, zoom limits,
-and AI tracking depend on the attached Viewpro model and firmware.
+Joystick axes are zero-based Linux axes. The gimbal Speed slider also controls
+joystick pan/tilt speed. Enable Joystick in its section after connecting. Actual
+command support, zoom limits, and AI tracking depend on the attached Viewpro
+model and firmware.

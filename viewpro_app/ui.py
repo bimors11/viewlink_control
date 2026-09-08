@@ -7,7 +7,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from . import viewlink_types as T
 from .camera_controller import CameraController, SOURCE_MOUSE, SOURCE_UI
-from .joystick import JoystickCommander, JoystickConfig, JoystickWorker
+from .joystick import DEFAULT_JOYSTICK_NAME, JoystickCommander, JoystickConfig, JoystickWorker
 from .sdk import ConnectionState, TELEMETRY_STALE_TIMEOUT, TRACK_VIDEO_HEIGHT, TRACK_VIDEO_WIDTH, ViewLinkSDK
 from .video import VIDEO_CONNECTING, VIDEO_LIVE, VIDEO_RECONNECTING, VIDEO_STOPPED, VideoWorker
 from .dashboard_theme import CockpitBackground, CollapsibleSection, apply_style
@@ -459,8 +459,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pan_channel = QtWidgets.QSpinBox()
         self.tilt_channel = QtWidgets.QSpinBox()
         self.zoom_channel = QtWidgets.QSpinBox()
-        for spin, value in [(self.pan_channel, 1), (self.tilt_channel, 2), (self.zoom_channel, 3)]:
-            spin.setRange(1, 32)
+        for spin, value in [(self.pan_channel, 0), (self.tilt_channel, 1), (self.zoom_channel, 2)]:
+            spin.setRange(0, 31)
             spin.setValue(value)
         self.joystick_state = QtWidgets.QLabel("pan +0.00  tilt +0.00  zoom +0.00")
         layout.addWidget(self.js_device, 0, 0, 1, 4)
@@ -590,6 +590,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         config = JoystickConfig(
             device=self.js_device.text().strip(),
+            name=DEFAULT_JOYSTICK_NAME,
             pan_channel=self.pan_channel.value(),
             tilt_channel=self.tilt_channel.value(),
             zoom_channel=self.zoom_channel.value(),
